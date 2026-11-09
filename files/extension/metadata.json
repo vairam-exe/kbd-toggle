@@ -1,0 +1,7 @@
+{
+  "uuid": "kbd-toggle@vairam",
+  "name": "Internal Keyboard Toggle",
+  "description": "Adds a keyboard icon to the top bar with a switch to enable or disable the laptop's built-in keyboard.",
+  "shell-version": ["48", "49", "50"],
+  "version": 1
+}

@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Root helper for the internal keyboard toggle.
+# Installed to /usr/local/sbin/kbd-internal, owned by root, mode 0755.
+# Accepts exactly three arguments: on | off | status
+#
+# This is the only privileged component. It does one thing: bind or unbind
+# the i8042 keyboard port from the atkbd driver, and set that port's bind_mode
+# so the kernel cannot quietly bind it again. Nothing else.
+set -euo pipefail
+
+DRV="/sys/bus/serio/drivers/atkbd"
+SERIO="/sys/bus/serio/devices"
+LOG="/var/log/kbd-internal.log"
+
+log() { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG" 2>/dev/null || true; }
+
+# Locate the keyboard port by its stable description rather than assuming
+# serio0, which can change across kernel or hardware changes.
+find_port() {
+    local d
+    for d in /sys/bus/serio/devices/serio*; do
+        [ -r "$d/description" ] || continue
+        if [ "$(cat "$d/description")" = "i8042 KBD port" ]; then
+            basename "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+[ "$(id -u)" -eq 0 ] || { echo "kbd-internal: must run as root" >&2; exit 77; }
+
+PORT="$(find_port)" || {
+    log "ERROR: no i8042 KBD port found"
+    echo "kbd-internal: no i8042 KBD port found" >&2
+    exit 2
+}
+
+# Unbinding alone does not keep the keyboard off. serio_interrupt() calls
+# serio_rescan() whenever a port with no driver receives an interrupt, so the
+# first key press makes the kernel re-probe the port and atkbd binds itself
+# straight back. Setting the port's bind_mode to "manual" makes
+# serio_bus_match() refuse every automatic bind, so the rescan finds nothing.
+#
+# The attribute compares the raw buffer, so it must be written without a
+# trailing newline. Kernels older than 6.11 have no bind_mode; there we fall
+# back to a plain unbind and accept that a key press re-enables the keyboard.
+set_bind_mode() {
+    local mode="$1" path="$SERIO/$PORT/bind_mode"
+    if [ ! -w "$path" ]; then
+        log "WARNING: $path is missing; a key press will re-enable the keyboard"
+        return 0
+    fi
+    if ! printf '%s' "$mode" > "$path"; then
+        log "ERROR: could not write bind_mode=$mode to $path"
+        return 1
+    fi
+    log "bind_mode=$mode $PORT"
+}
+
+case "${1:-}" in
+    off)
+        # Manual first: a key press landing between the two writes would
+        # otherwise re-bind the driver before the unbind happens.
+        set_bind_mode manual || exit 1
+        if [ -e "$DRV/$PORT" ]; then
+            printf '%s' "$PORT" > "$DRV/unbind"
+            log "unbound $PORT"
+        else
+            log "already unbound $PORT"
+        fi
+        ;;
+    on)
+        # Auto first: bind_store() runs serio_bus_match(), which refuses to
+        # bind anything while bind_mode is still manual.
+        set_bind_mode auto || exit 1
+        if [ -e "$DRV/$PORT" ]; then
+            log "already bound $PORT"
+        else
+            printf '%s' "$PORT" > "$DRV/bind"
+            log "bound $PORT"
+        fi
+        ;;
+    status)
+        if [ -e "$DRV/$PORT" ]; then
+            echo "enabled"
+        else
+            echo "disabled"
+        fi
+        ;;
+    *)
+        echo "usage: kbd-internal on|off|status" >&2
+        exit 64
+        ;;
+esac

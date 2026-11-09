@@ -1,0 +1,15 @@
+[Unit]
+Description=Keep the internal laptop keyboard disabled while logged in
+Documentation=file:///home/vairam/kbd-toggle/README.md
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/vairam/.local/bin/kbd-guard.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=graphical-session.target

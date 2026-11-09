@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Toggle the internal laptop keyboard.
+# Installed to ~/.local/bin/kbd-toggle, owned by you, mode 0755.
+#
+# Usage: kbd-toggle [toggle|on|off|status]
+#   toggle  (default) flip the current state
+#   on      enable the internal keyboard
+#   off     disable the internal keyboard
+#   status  print "enabled" or "disabled"
+#
+# Runtime-only by design: the disabled state lives in kernel memory and is
+# never written to disk, so a reboot always restores the keyboard.
+set -uo pipefail
+
+# gnome-shell launches this with a minimal environment, so pin the PATH.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+HELPER="/usr/local/sbin/kbd-internal"
+DRV="/sys/bus/serio/drivers/atkbd"
+INTERNAL_NAME="AT Translated Set 2 keyboard"
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/kbd-toggle"
+LOG="$STATE_DIR/toggle.log"
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/kbd-toggle.lock"
+FORCE_FLAG="$HOME/.config/kbd-toggle/allow-no-external"
+
+mkdir -p "$STATE_DIR"
+
+# A .desktop launch does not always carry the session bus; rebuild it if absent.
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+log() { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG"; }
+
+notify() {
+    # The top-bar menu shows the state itself, so it can ask for silence.
+    [ "${KBD_TOGGLE_QUIET:-0}" = "1" ] && return 0
+    local icon="$1" body="$2" urgency="${3:-normal}"
+    notify-send --app-name="Keyboard Toggle" --icon="$icon" \
+                --urgency="$urgency" --expire-time=4000 \
+                "Internal keyboard" "$body" 2>>"$LOG" \
+        || log "notify-send failed"
+}
+
+# One instance at a time, so double-clicking the dock icon is harmless.
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    log "another instance is running; exiting"
+    exit 0
+fi
+
+find_port() {
+    local d
+    for d in /sys/bus/serio/devices/serio*; do
+        [ -r "$d/description" ] || continue
+        if [ "$(cat "$d/description")" = "i8042 KBD port" ]; then
+            basename "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Count keyboards other than the internal one, so we never disable the last
+# keyboard on the machine.
+count_external_keyboards() {
+    udevadm info --export-db 2>/dev/null | awk -v skip="$INTERNAL_NAME" '
+        BEGIN { RS=""; FS="\n" }
+        /ID_INPUT_KEYBOARD=1/ && index($0, skip) == 0 { n++ }
+        END { print n+0 }
+    '
+}
+
+PORT="$(find_port)" || {
+    log "ERROR: i8042 KBD port not found"
+    notify input-keyboard "Could not locate the i8042 keyboard port." critical
+    exit 1
+}
+
+is_bound() { [ -e "$DRV/$PORT" ]; }
+
+# Prefer the passwordless sudoers rule; fall back to a graphical password
+# prompt if it is not installed.
+run_helper() {
+    local action="$1"
+    if sudo -n -l "$HELPER" >/dev/null 2>&1; then
+        sudo -n "$HELPER" "$action"
+    else
+        pkexec "$HELPER" "$action"
+    fi
+}
+
+MODE="${1:-toggle}"
+
+case "$MODE" in
+    status)
+        if is_bound; then echo "enabled"; else echo "disabled"; fi
+        exit 0
+        ;;
+    on|off|toggle) ;;
+    *)
+        echo "usage: kbd-toggle [toggle|on|off|status]" >&2
+        exit 64
+        ;;
+esac
+
+EXT="$(count_external_keyboards)"
+
+if [ "$MODE" = "toggle" ]; then
+    if is_bound; then MODE="off"; else MODE="on"; fi
+fi
+
+if [ "$MODE" = "off" ]; then
+    if [ "$EXT" -eq 0 ] && [ ! -e "$FORCE_FLAG" ]; then
+        log "refused off: no external keyboard detected"
+        notify input-keyboard "Refused: no external keyboard detected. Plug one in first." critical
+        exit 3
+    fi
+    EXPECT_BOUND=0
+else
+    EXPECT_BOUND=1
+fi
+
+log "request=$MODE port=$PORT external_keyboards=$EXT"
+
+run_helper "$MODE"
+RC=$?
+
+case "$RC" in
+    0)   : ;;
+    126) log "auth dismissed"; notify dialog-password "Cancelled. Nothing changed." normal; exit 0 ;;
+    127) log "not authorized"; notify dialog-error "Not authorized. Nothing changed." critical; exit 1 ;;
+    *)   log "helper failed rc=$RC"; notify dialog-error "Helper failed (exit $RC). See $LOG" critical; exit 1 ;;
+esac
+
+# Verify the state actually changed instead of assuming it did.
+if is_bound; then NOW=1; else NOW=0; fi
+
+if [ "$NOW" -eq "$EXPECT_BOUND" ]; then
+    if [ "$NOW" -eq 1 ]; then
+        log "verified: enabled"
+        notify input-keyboard "Enabled." normal
+    else
+        # Unbound is only durable while the port is in manual bind mode.
+        # Otherwise the next key press makes the kernel re-probe the port and
+        # atkbd binds itself back, which looks like the switch flipping on.
+        BIND_MODE="$(cat "/sys/bus/serio/devices/$PORT/bind_mode" 2>/dev/null || echo unknown)"
+        if [ "$BIND_MODE" = "manual" ]; then
+            log "verified: disabled"
+        else
+            log "WARNING: disabled but bind_mode=$BIND_MODE; a key press will re-enable it"
+        fi
+        notify input-keyboard "Disabled. Click the dock icon to re-enable." normal
+    fi
+else
+    log "VERIFY FAILED: expected bound=$EXPECT_BOUND got bound=$NOW"
+    notify dialog-error "State did not change as expected. See $LOG" critical
+    exit 1
+fi

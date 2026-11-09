@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Toggle Internal Keyboard
+Comment=Turn the laptop's built-in keyboard on or off
+Exec=/home/vairam/.local/bin/kbd-toggle toggle
+Icon=input-keyboard
+Terminal=false
+Categories=Utility;
+StartupNotify=false

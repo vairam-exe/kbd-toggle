@@ -1,0 +1,3 @@
+# Allow vairam to run the keyboard helper without a password.
+# Scoped to this one binary and nothing else.
+vairam ALL=(root) NOPASSWD: /usr/local/sbin/kbd-internal
