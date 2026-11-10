@@ -1,12 +1,17 @@
 [Unit]
 Description=Keep the internal laptop keyboard disabled while logged in
-Documentation=file:///home/vairam/kbd-toggle/README.md
+Documentation=file://__HOME__/kbd-toggle/README.md
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/home/vairam/.local/bin/kbd-guard.py
+ExecStart=__HOME__/.local/bin/kbd-guard.py
+# Catch every stop path, including SIGKILL, OOM and a hung child: nothing on
+# this machine should leave the internal keyboard off with no guard running.
+# The '-' prefix keeps a failure here (e.g. the session bus is already gone
+# at logout) from marking the unit failed.
+ExecStopPost=-__HOME__/.local/bin/kbd-toggle on
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20

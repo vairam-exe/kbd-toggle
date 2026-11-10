@@ -3,8 +3,19 @@
 # Run with:  sudo bash ~/kbd-toggle/uninstall.sh
 set -uo pipefail
 
-TARGET_USER="vairam"
-TARGET_HOME="/home/vairam"
+# Derive the target user the same way install.sh does.
+if [ -n "${KBD_TARGET_USER:-}" ]; then
+    TARGET_USER="$KBD_TARGET_USER"
+elif [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-root}" != "root" ]; then
+    TARGET_USER="$SUDO_USER"
+else
+    echo "ERROR: this uninstaller needs to know which user to uninstall for."
+    echo "       Run it as that user with sudo:   sudo bash $0"
+    echo "       Or name the user explicitly:      sudo KBD_TARGET_USER=name bash $0"
+    exit 1
+fi
+
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 TARGET_UID="$(id -u "$TARGET_USER")"
 RUNTIME_DIR="/run/user/$TARGET_UID"
 BUS_ADDR="unix:path=$RUNTIME_DIR/bus"
@@ -26,6 +37,7 @@ as_user() {
 
 echo "==> Stopping the login service"
 as_user systemctl --user disable --now kbd-guard.service >/dev/null 2>&1 || true
+as_user systemctl --user daemon-reload >/dev/null 2>&1 || true
 
 echo "==> Re-enabling the keyboard"
 if [ -x /usr/local/sbin/kbd-internal ]; then
@@ -52,6 +64,11 @@ rm -f "$TARGET_HOME/.local/bin/kbd-guard.py"
 rm -f "$TARGET_HOME/.local/share/applications/kbd-toggle.desktop"
 rm -f "$TARGET_HOME/.config/systemd/user/kbd-guard.service"
 rm -rf "$TARGET_HOME/.local/state/kbd-toggle"
+rm -rf "$TARGET_HOME/.config/kbd-toggle"
+# The root-owned helper log, its rotation rule, and the runtime lock.
+rm -f /var/log/kbd-internal.log
+rm -f /etc/logrotate.d/kbd-internal
+rm -f "$RUNTIME_DIR/kbd-toggle.lock"
 
 as_user update-desktop-database "$TARGET_HOME/.local/share/applications" \
     >/dev/null 2>&1 || true
