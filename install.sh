@@ -115,6 +115,14 @@ preflight() {
         echo "    WARNING: logrotate not found; the helper log will grow unbounded."
     fi
 
+    if command -v glib-compile-schemas >/dev/null 2>&1; then
+        echo "    OK: glib-compile-schemas found"
+    else
+        echo "    FATAL: glib-compile-schemas is missing (libglib2.0-bin)."
+        echo "           The extension's settings schema cannot be compiled."
+        fatal=1
+    fi
+
     version="$(gnome-shell --version 2>/dev/null | awk '{print $NF}')" || true
     major="$(printf '%s' "$version" | cut -d. -f1 | tr -cd '0-9')"
     if [ -n "$version" ] && [ "${major:-0}" -ge 48 ] 2>/dev/null; then
@@ -162,9 +170,17 @@ install -o "$TARGET_USER" -g "$TARGET_USER" -m 0644 \
     "$TMPD/kbd-guard.service" "$TARGET_HOME/.config/systemd/user/kbd-guard.service"
 
 echo "==> 4/8  Installing the top-bar extension"
-if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" \
-        "$SRC/extension/metadata.json" >/dev/null 2>&1; then
-    echo "ERROR: extension/metadata.json is not valid JSON."
+if ! python3 - "$SRC/extension/metadata.json" <<'PY' >/dev/null 2>&1
+import json, sys
+meta = json.load(open(sys.argv[1]))
+for key in ("uuid", "name", "description", "shell-version", "settings-schema"):
+    if key not in meta:
+        raise SystemExit(f"metadata.json is missing '{key}'")
+PY
+then
+    echo "ERROR: extension/metadata.json is not valid JSON, or is missing a"
+    echo "       required key (uuid, name, description, shell-version,"
+    echo "       settings-schema)."
     exit 1
 fi
 install -d -o "$TARGET_USER" -g "$TARGET_USER" "$EXT_DIR"
@@ -172,6 +188,21 @@ install -o "$TARGET_USER" -g "$TARGET_USER" -m 0644 \
     "$SRC/extension/metadata.json" "$EXT_DIR/metadata.json"
 install -o "$TARGET_USER" -g "$TARGET_USER" -m 0644 \
     "$SRC/extension/extension.js" "$EXT_DIR/extension.js"
+install -o "$TARGET_USER" -g "$TARGET_USER" -m 0644 \
+    "$SRC/extension/prefs.js" "$EXT_DIR/prefs.js"
+
+# The extension ships its own GSettings schema. GNOME Shell adds
+# <extension>/schemas to the schema search path when the extension loads, so
+# the compiled file has to sit next to the XML.
+install -d -o "$TARGET_USER" -g "$TARGET_USER" "$EXT_DIR/schemas"
+install -o "$TARGET_USER" -g "$TARGET_USER" -m 0644 \
+    "$SRC/extension/schemas/org.gnome.shell.extensions.kbd-toggle.gschema.xml" \
+    "$EXT_DIR/schemas/"
+if ! glib-compile-schemas "$EXT_DIR/schemas"; then
+    echo "ERROR: could not compile the extension's GSettings schema."
+    exit 1
+fi
+chown "$TARGET_USER:$TARGET_USER" "$EXT_DIR/schemas/gschemas.compiled"
 
 # The shell only scans the extensions directory at startup, so a freshly
 # copied extension is unknown to `gnome-extensions enable`. Write the UUID

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.kbd-toggle"
+          path="/org/gnome/shell/extensions/kbd-toggle/">
+    <key name="poll-interval-seconds" type="i">
+      <default>30</default>
+      <range min="5" max="300"/>
+      <summary>State poll interval</summary>
+      <description>
+        How often, in seconds, the extension re-reads the kernel state as a
+        fallback for the sysfs file monitor. Lower values react faster to a
+        toggle made outside the extension; higher values wake the CPU less.
+      </description>
+    </key>
+  </schema>
+</schemalist>

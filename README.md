@@ -65,12 +65,14 @@ After logging back in:
 | Type on the laptop keyboard | Click the top-bar icon, turn the switch on |
 | Go back to the external keyboard | Click the icon, turn the switch off |
 | Check the state at a glance | Dimmed icon = disabled, bright = enabled |
+| Fix the keyboard from the lock screen | The same icon is on the lock screen; flip the switch there |
 | Use a terminal instead | `~/.local/bin/kbd-toggle status` |
 | See what happened | `cat ~/.local/state/kbd-toggle/toggle.log` |
 
 The switch always shows the **real** kernel state. The extension watches the
 kernel driver directory directly and refreshes at least every 30 seconds, so it
-stays correct even if you toggle from a terminal.
+stays correct even if you toggle from a terminal. That fallback interval is
+adjustable under **Extensions → Internal Keyboard Toggle → Preferences**.
 
 ---
 
@@ -183,7 +185,8 @@ Then log out and back in to clear the top-bar icon.
 ## Developing
 
 The regression tests cover the external-keyboard count (the safety guard's
-core) and syntax-check all scripts:
+core), syntax-check all scripts, and validate the extension's `metadata.json`,
+GSettings schema and JavaScript:
 
 ```bash
 bash ~/kbd-toggle/tests/run-tests.sh
@@ -201,7 +204,7 @@ bash ~/kbd-toggle/tests/run-tests.sh
 | `~/.local/bin/kbd-toggle` | you | Toggle logic, safety checks, notifications |
 | `~/.local/bin/kbd-guard.py` | you | Login / logout / lock handling |
 | `~/.config/systemd/user/kbd-guard.service` | you | Starts the guard at login |
-| `~/.local/share/gnome-shell/extensions/kbd-toggle@vairam/` | you | The top-bar icon |
+| `~/.local/share/gnome-shell/extensions/kbd-toggle@vairam/` | you | The top-bar icon, its preferences window, and its compiled settings schema |
 | `~/.local/share/applications/kbd-toggle.desktop` | you | The optional dock icon |
 | `~/.local/state/kbd-toggle/*.log` | you | Logs |
 | `/var/log/kbd-internal.log` | root | Helper log |
