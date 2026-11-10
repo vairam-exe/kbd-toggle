@@ -20,9 +20,10 @@ const TOGGLE = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'kbd-
 const ATKBD = '/sys/bus/serio/drivers/atkbd';
 const SERIO = '/sys/bus/serio/devices';
 const PORT_DESCRIPTION = 'i8042 KBD port';
-// Fallback poll interval. The FileMonitor below updates immediately when
-// kernfs emits inotify events for the bind/unbind; sysfs inotify support is
-// not guaranteed, so the poll stays as the safety net.
+// Fallback poll interval, used only when the settings schema is unavailable.
+// The FileMonitor below updates immediately when kernfs emits inotify events
+// for the bind/unbind; sysfs inotify support is not guaranteed, so the poll
+// stays as the safety net. The live value is 'poll-interval-seconds'.
 const STATE_POLL_SECONDS = 30;
 
 function readText(path) {
@@ -59,9 +60,11 @@ function findPort() {
 
 const Indicator = GObject.registerClass(
 class Indicator extends PanelMenu.Button {
-    _init() {
+    _init(settings) {
         super._init(0.0, 'Internal Keyboard', false);
 
+        this._settings = settings;
+        this._settingsId = 0;
         this._port = findPort();
         this._syncing = false;
         this._busy = false;
@@ -93,10 +96,14 @@ class Indicator extends PanelMenu.Button {
     // there) plus a fallback poll, in case kernfs does not emit inotify
     // events on this system.
     _watchState() {
-        this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, STATE_POLL_SECONDS, () => {
-            this._sync();
-            return GLib.SOURCE_CONTINUE;
-        });
+        this._startPoll();
+
+        // Re-arm the timer when the interval changes in preferences, so the
+        // new value takes effect without a shell restart.
+        if (this._settings) {
+            this._settingsId = this._settings.connect('changed::poll-interval-seconds',
+                () => this._startPoll());
+        }
 
         try {
             this._stateMonitor = Gio.File.new_for_path(ATKBD).monitor_directory(
@@ -106,6 +113,24 @@ class Indicator extends PanelMenu.Button {
         } catch (e) {
             logError(e, 'kbd-toggle: could not watch the atkbd directory');
         }
+    }
+
+    // (Re)arm the fallback poll. Called at startup and whenever the interval
+    // changes in preferences.
+    _startPoll() {
+        if (this._timer) {
+            GLib.source_remove(this._timer);
+            this._timer = 0;
+        }
+
+        const seconds = this._settings
+            ? this._settings.get_int('poll-interval-seconds')
+            : STATE_POLL_SECONDS;
+
+        this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, seconds, () => {
+            this._sync();
+            return GLib.SOURCE_CONTINUE;
+        });
     }
 
     // Prefer a real switch. Fall back to a plain menu item if the switch class
@@ -223,6 +248,10 @@ class Indicator extends PanelMenu.Button {
     }
 
     destroy() {
+        if (this._settingsId) {
+            this._settings.disconnect(this._settingsId);
+            this._settingsId = 0;
+        }
         if (this._timer) {
             GLib.source_remove(this._timer);
             this._timer = 0;
@@ -239,7 +268,16 @@ class Indicator extends PanelMenu.Button {
 
 export default class KbdToggleExtension extends Extension {
     enable() {
-        this._indicator = new Indicator();
+        // A hand-copied install can lack the compiled schema; fall back to the
+        // built-in interval rather than failing to load.
+        let settings = null;
+        try {
+            settings = this.getSettings();
+        } catch (e) {
+            logError(e, 'kbd-toggle: settings schema unavailable, using defaults');
+        }
+
+        this._indicator = new Indicator(settings);
         Main.panel.addToStatusArea('kbd-toggle', this._indicator);
     }
 

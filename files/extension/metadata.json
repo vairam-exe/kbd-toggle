@@ -3,5 +3,9 @@
   "name": "Internal Keyboard Toggle",
   "description": "Adds a keyboard icon to the top bar with a switch to enable or disable the laptop's built-in keyboard.",
   "shell-version": ["48", "49", "50"],
-  "version": 1
+  "url": "https://github.com/vairam-exe/kbd-toggle",
+  "version": 1,
+  "version-name": "1.0",
+  "settings-schema": "org.gnome.shell.extensions.kbd-toggle",
+  "session-modes": ["user", "unlock-dialog"]
 }

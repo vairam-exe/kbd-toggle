@@ -150,6 +150,63 @@ else
     systemd-analyze verify "$rendered_unit" 2>&1 | sed 's/^/     /' | head -5
 fi
 
+# --- Extension metadata, schema and JS --------------------------------------
+echo "== extension metadata"
+META="$ROOT/files/extension/metadata.json"
+if python3 - "$META" <<'PY' >/dev/null 2>&1
+import json, sys
+meta = json.load(open(sys.argv[1]))
+required = ("uuid", "name", "description", "shell-version", "url",
+            "version", "version-name", "settings-schema", "session-modes")
+missing = [k for k in required if k not in meta]
+if missing:
+    raise SystemExit("missing keys: " + ", ".join(missing))
+if meta["settings-schema"] != "org.gnome.shell.extensions.kbd-toggle":
+    raise SystemExit("settings-schema does not match the shipped schema id")
+if "unlock-dialog" not in meta["session-modes"]:
+    raise SystemExit("session-modes must include unlock-dialog")
+PY
+then
+    ok
+else
+    bad "metadata.json is missing a required key or has a wrong value"
+fi
+
+echo "== extension schema"
+SCHEMA_DIR="$TMP/schemas"
+mkdir -p "$SCHEMA_DIR"
+cp "$ROOT/files/extension/schemas/"*.gschema.xml "$SCHEMA_DIR/"
+if glib-compile-schemas --strict "$SCHEMA_DIR" 2>"$TMP/schema.err"; then
+    ok
+else
+    bad "the GSettings schema does not compile: $(head -1 "$TMP/schema.err")"
+fi
+# The key has to exist in the schema and be read by the extension, or the
+# preferences window would edit a value nothing consumes.
+if grep -q 'name="poll-interval-seconds"' "$SCHEMA_DIR"/*.gschema.xml &&
+    grep -q "get_int('poll-interval-seconds')" "$ROOT/files/extension/extension.js"; then
+    ok
+else
+    bad "poll-interval-seconds is not wired between the schema and extension.js"
+fi
+
+echo "== extension JS parses"
+if command -v gjs >/dev/null 2>&1; then
+    for js in extension.js prefs.js; do
+        # Outside gnome-shell the shell's resource:/// imports cannot resolve,
+        # which is expected. A syntax error is reported differently, as
+        # "Failed to parse module". LD_LIBRARY_PATH is cleared because some
+        # editors export their own libstdc++, which breaks gjs.
+        out="$(env -u LD_LIBRARY_PATH gjs -m "$ROOT/files/extension/$js" 2>&1 | tr '\n' ' ')"
+        case "$out" in
+            *"Failed to parse module"*) bad "$js does not parse: $out" ;;
+            *) ok ;;
+        esac
+    done
+else
+    echo "   note: gjs not found, skipping the JS parse check"
+fi
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
