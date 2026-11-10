@@ -16,6 +16,8 @@ Built for `vairam-TUF-Gaming-FX505DT-FX505DT` — Ubuntu 26.04, GNOME 50 on Wayl
 | Login service | Disables the keyboard automatically once you are logged in |
 | Logout safety | Re-enables it when you log out, so the login screen always works |
 | Lock-screen safety | If the screen locks and no external keyboard is plugged in, it turns the keyboard back on so you cannot lock yourself out |
+| Crash safety | If the guard service is killed, systemd turns the keyboard back on when it stops |
+| Hotplug safety | If you unplug the last external keyboard while the built-in one is off, the built-in one turns back on by itself |
 | Dock icon (optional) | The same toggle, if you prefer clicking a dock icon |
 
 The top-bar icon is **dimmed** when the keyboard is disabled and **bright** when
@@ -23,7 +25,9 @@ it is enabled, so you can tell the state without opening the menu.
 
 Your Logitech K230 counts as an external keyboard, so the automatic disable is
 allowed. If you unplug it, the tool **refuses** to disable the built-in keyboard
-rather than leaving you with no keyboard at all.
+rather than leaving you with no keyboard at all. If you unplug it **while the
+built-in keyboard is already off**, the login guard turns the built-in one back
+on automatically.
 
 ---
 
@@ -33,7 +37,9 @@ rather than leaving you with no keyboard at all.
 sudo bash ~/kbd-toggle/install.sh
 ```
 
-Type your password. You will see seven numbered steps, then `Install complete.`
+Type your password. You will see preflight checks (it verifies the i8042 port,
+`bind_mode`, `notify-send`, `python3-gi` and GNOME Shell), then eight numbered
+steps, then `Install complete.`
 
 ---
 
@@ -62,8 +68,9 @@ After logging back in:
 | Use a terminal instead | `~/.local/bin/kbd-toggle status` |
 | See what happened | `cat ~/.local/state/kbd-toggle/toggle.log` |
 
-The switch always shows the **real** kernel state. It re-reads it every two
-seconds, so it stays correct even if you toggle from a terminal.
+The switch always shows the **real** kernel state. The extension watches the
+kernel driver directory directly and refreshes at least every 30 seconds, so it
+stays correct even if you toggle from a terminal.
 
 ---
 
@@ -96,6 +103,11 @@ gnome-extensions enable kbd-toggle@vairam
 **The switch flips back immediately.**
 That is the safety guard: no external keyboard was detected. Plug the Logitech
 receiver back in. The menu shows "Refused: no external keyboard detected".
+
+**The internal keyboard turned itself back on.**
+If you just unplugged the external keyboard, that is the hotplug guard: the
+login re-enables the built-in keyboard so the machine is never left without
+one. See `~/.local/state/kbd-toggle/guard.log` for the exact reason.
 
 **The keyboard turns itself back on after a key press.**
 That was a bug in earlier versions. Unbinding the driver is not enough on its
@@ -168,6 +180,15 @@ sudo bash ~/kbd-toggle/uninstall.sh
 
 Then log out and back in to clear the top-bar icon.
 
+## Developing
+
+The regression tests cover the external-keyboard count (the safety guard's
+core) and syntax-check all scripts:
+
+```bash
+bash ~/kbd-toggle/tests/run-tests.sh
+```
+
 ---
 
 ## Files it installs
@@ -175,7 +196,8 @@ Then log out and back in to clear the top-bar icon.
 | Path | Owner | Purpose |
 |---|---|---|
 | `/usr/local/sbin/kbd-internal` | root | The only privileged part |
-| `/etc/sudoers.d/kbd-toggle` | root | Lets you run that one helper without a password |
+| `/etc/sudoers.d/kbd-toggle` | root | Lets you run that one helper, with `on`/`off`/`status` only, without a password |
+| `/etc/logrotate.d/kbd-internal` | root | Keeps `/var/log/kbd-internal.log` bounded (weekly, 4 rotations) |
 | `~/.local/bin/kbd-toggle` | you | Toggle logic, safety checks, notifications |
 | `~/.local/bin/kbd-guard.py` | you | Login / logout / lock handling |
 | `~/.config/systemd/user/kbd-guard.service` | you | Starts the guard at login |

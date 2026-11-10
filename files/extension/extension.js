@@ -20,6 +20,10 @@ const TOGGLE = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'kbd-
 const ATKBD = '/sys/bus/serio/drivers/atkbd';
 const SERIO = '/sys/bus/serio/devices';
 const PORT_DESCRIPTION = 'i8042 KBD port';
+// Fallback poll interval. The FileMonitor below updates immediately when
+// kernfs emits inotify events for the bind/unbind; sysfs inotify support is
+// not guaranteed, so the poll stays as the safety net.
+const STATE_POLL_SECONDS = 30;
 
 function readText(path) {
     try {
@@ -60,7 +64,9 @@ class Indicator extends PanelMenu.Button {
 
         this._port = findPort();
         this._syncing = false;
+        this._busy = false;
         this._timer = 0;
+        this._stateMonitor = null;
 
         this._icon = new St.Icon({
             icon_name: 'input-keyboard-symbolic',
@@ -79,10 +85,27 @@ class Indicator extends PanelMenu.Button {
 
         this._sync();
 
-        this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, () => {
+        this._watchState();
+    }
+
+    // Keep the switch in sync with kernel state: a FileMonitor on the atkbd
+    // driver directory (binding the port adds and removes the port symlink
+    // there) plus a fallback poll, in case kernfs does not emit inotify
+    // events on this system.
+    _watchState() {
+        this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, STATE_POLL_SECONDS, () => {
             this._sync();
             return GLib.SOURCE_CONTINUE;
         });
+
+        try {
+            this._stateMonitor = Gio.File.new_for_path(ATKBD).monitor_directory(
+                Gio.FileMonitorFlags.NONE, null);
+            this._stateMonitorId = this._stateMonitor.connect('changed',
+                () => this._sync());
+        } catch (e) {
+            logError(e, 'kbd-toggle: could not watch the atkbd directory');
+        }
     }
 
     // Prefer a real switch. Fall back to a plain menu item if the switch class
@@ -119,6 +142,11 @@ class Indicator extends PanelMenu.Button {
     }
 
     _sync() {
+        // While a toggle is in flight, the switch stays as the user set it;
+        // the completion callback re-syncs from the verified kernel state.
+        if (this._busy)
+            return;
+
         const enabled = this._isEnabled();
 
         // setToggleState emits 'toggled', so guard against re-entering _apply.
@@ -146,6 +174,21 @@ class Indicator extends PanelMenu.Button {
     _apply(enable) {
         const action = enable ? 'on' : 'off';
 
+        // Double-clicks spawn one toggle only; kbd-toggle's flock would
+        // serialize them anyway, but the switch would desync from reality.
+        if (this._busy)
+            return;
+        this._busy = true;
+        if (this._switchItem.setSensitive)
+            this._switchItem.setSensitive(false);
+
+        const done = () => {
+            this._busy = false;
+            if (this._switchItem.setSensitive)
+                this._switchItem.setSensitive(true);
+            this._sync();
+        };
+
         try {
             const launcher = new Gio.SubprocessLauncher({
                 flags: Gio.SubprocessFlags.STDOUT_SILENCE |
@@ -155,19 +198,27 @@ class Indicator extends PanelMenu.Button {
             launcher.setenv('KBD_TOGGLE_QUIET', '1', true);
 
             const proc = launcher.spawnv([TOGGLE, action]);
-            proc.wait_check_async(null, (p, res) => {
-                try {
-                    p.wait_check_finish(res);
+            proc.wait_async(null, (p, res) => {
+                p.wait_finish(res);
+                const status = p.get_exit_status();
+                if (status === 0) {
                     this._setMessage('');
-                } catch (e) {
-                    // Exit 3 means the safety guard refused: no external keyboard.
+                } else if (status === 3) {
+                    // The safety guard refused: no external keyboard.
                     this._setMessage('Refused: no external keyboard detected');
+                } else if (status === 126) {
+                    this._setMessage('Cancelled: nothing changed');
+                } else if (status === 127) {
+                    this._setMessage('Not authorized: nothing changed');
+                } else {
+                    this._setMessage(`Helper failed (exit ${status})`);
                 }
-                this._sync();
+                done();
             });
         } catch (e) {
             logError(e, 'kbd-toggle: could not run the toggle script');
             this._setMessage('Could not run the toggle script');
+            done();
         }
     }
 
@@ -175,6 +226,12 @@ class Indicator extends PanelMenu.Button {
         if (this._timer) {
             GLib.source_remove(this._timer);
             this._timer = 0;
+        }
+        if (this._stateMonitor) {
+            if (this._stateMonitorId)
+                this._stateMonitor.disconnect(this._stateMonitorId);
+            this._stateMonitor.cancel();
+            this._stateMonitor = null;
         }
         super.destroy();
     }

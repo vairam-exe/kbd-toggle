@@ -18,6 +18,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 HELPER="/usr/local/sbin/kbd-internal"
 DRV="/sys/bus/serio/drivers/atkbd"
 INTERNAL_NAME="AT Translated Set 2 keyboard"
+BYPATH_DIR="${KBD_BYPATH_DIR:-/dev/input/by-path}"
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/kbd-toggle"
 LOG="$STATE_DIR/toggle.log"
@@ -50,25 +51,58 @@ if ! flock -n 9; then
 fi
 
 find_port() {
-    local d
+    local d name first="" matched="" count=0
     for d in /sys/bus/serio/devices/serio*; do
         [ -r "$d/description" ] || continue
-        if [ "$(cat "$d/description")" = "i8042 KBD port" ]; then
-            basename "$d"
+        [ "$(cat "$d/description")" = "i8042 KBD port" ] || continue
+        count=$((count + 1))
+        [ -z "$first" ] && first="$(basename "$d")"
+        # With more than one i8042 KBD port, prefer the one whose input
+        # device actually names the internal keyboard.
+        for name in "$d"/input/input*/name; do
+            [ -r "$name" ] || continue
+            if [ "$(cat "$name")" = "$INTERNAL_NAME" ]; then
+                matched="$(basename "$d")"
+                break
+            fi
+        done
+        [ -n "$matched" ] && break
+    done
+    if [ -z "$first" ]; then
+        return 1
+    fi
+    if [ "$count" -gt 1 ]; then
+        if [ -n "$matched" ]; then
+            printf '%s\n' "$matched"
             return 0
         fi
-    done
-    return 1
+        log "WARNING: $count i8042 KBD ports found; using $first"
+    fi
+    printf '%s\n' "$first"
 }
 
-# Count keyboards other than the internal one, so we never disable the last
-# keyboard on the machine.
+# Count physical keyboards other than the internal one, so we never disable
+# the last keyboard on the machine.
+#
+# Count via /dev/input/by-path instead of `udevadm info --export-db`: udev
+# emits one block per input device AND per event node, and the internal
+# keyboard's event node carries no NAME, so it was counted as external and
+# the count moved with the toggle state. Here the internal keyboard is
+# exactly the platform-i8042-serio-* prefix, one physical keyboard is one
+# event node, and no subprocess is needed.
 count_external_keyboards() {
-    udevadm info --export-db 2>/dev/null | awk -v skip="$INTERNAL_NAME" '
-        BEGIN { RS=""; FS="\n" }
-        /ID_INPUT_KEYBOARD=1/ && index($0, skip) == 0 { n++ }
-        END { print n+0 }
-    '
+    local n=0 f target seen="|"
+    for f in "$BYPATH_DIR"/*-event-kbd; do
+        [ -e "$f" ] || continue
+        case "$f" in *platform-i8042-serio-*) continue ;; esac
+        # A USB keyboard gets two by-path links (usb- and usbv2-) to the
+        # same event node; count physical devices, not links.
+        target="$(readlink -f "$f")" || continue
+        case "$seen" in *"|$target|"*) continue ;; esac
+        seen="$seen$target|"
+        n=$((n + 1))
+    done
+    printf '%s\n' "$n"
 }
 
 PORT="$(find_port)" || {
@@ -80,10 +114,11 @@ PORT="$(find_port)" || {
 is_bound() { [ -e "$DRV/$PORT" ]; }
 
 # Prefer the passwordless sudoers rule; fall back to a graphical password
-# prompt if it is not installed.
+# prompt if it is not installed. The sudoers rule lists the exact allowed
+# commands, so the probe must name the verb we are about to run.
 run_helper() {
     local action="$1"
-    if sudo -n -l "$HELPER" >/dev/null 2>&1; then
+    if sudo -n -l "$HELPER" "$action" >/dev/null 2>&1; then
         sudo -n "$HELPER" "$action"
     else
         pkexec "$HELPER" "$action"
@@ -128,8 +163,8 @@ RC=$?
 
 case "$RC" in
     0)   : ;;
-    126) log "auth dismissed"; notify dialog-password "Cancelled. Nothing changed." normal; exit 0 ;;
-    127) log "not authorized"; notify dialog-error "Not authorized. Nothing changed." critical; exit 1 ;;
+    126) log "auth dismissed"; notify dialog-password "Cancelled. Nothing changed." normal; exit 126 ;;
+    127) log "not authorized"; notify dialog-error "Not authorized. Nothing changed." critical; exit 127 ;;
     *)   log "helper failed rc=$RC"; notify dialog-error "Helper failed (exit $RC). See $LOG" critical; exit 1 ;;
 esac
 

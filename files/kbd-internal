@@ -11,24 +11,53 @@ set -euo pipefail
 DRV="/sys/bus/serio/drivers/atkbd"
 SERIO="/sys/bus/serio/devices"
 LOG="/var/log/kbd-internal.log"
+INTERNAL_NAME="AT Translated Set 2 keyboard"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG" 2>/dev/null || true; }
 
 # Locate the keyboard port by its stable description rather than assuming
-# serio0, which can change across kernel or hardware changes.
+# serio0, which can change across kernel or hardware changes. If several
+# ports match, prefer the one whose input device names the internal
+# keyboard, and leave a warning in the log.
 find_port() {
-    local d
+    local d name first="" matched="" count=0
     for d in /sys/bus/serio/devices/serio*; do
         [ -r "$d/description" ] || continue
-        if [ "$(cat "$d/description")" = "i8042 KBD port" ]; then
-            basename "$d"
+        [ "$(cat "$d/description")" = "i8042 KBD port" ] || continue
+        count=$((count + 1))
+        [ -z "$first" ] && first="$(basename "$d")"
+        for name in "$d"/input/input*/name; do
+            [ -r "$name" ] || continue
+            if [ "$(cat "$name")" = "$INTERNAL_NAME" ]; then
+                matched="$(basename "$d")"
+                break
+            fi
+        done
+        [ -n "$matched" ] && break
+    done
+    if [ -z "$first" ]; then
+        return 1
+    fi
+    if [ "$count" -gt 1 ]; then
+        if [ -n "$matched" ]; then
+            printf '%s\n' "$matched"
             return 0
         fi
-    done
-    return 1
+        log "WARNING: $count i8042 KBD ports found; using $first"
+    fi
+    printf '%s\n' "$first"
 }
 
 [ "$(id -u)" -eq 0 ] || { echo "kbd-internal: must run as root" >&2; exit 77; }
+
+# Two direct root callers must not interleave the bind_mode write and the
+# bind/unbind write.
+exec 8>/run/kbd-internal.lock
+if ! flock -w 10 8; then
+    log "ERROR: timed out waiting for /run/kbd-internal.lock"
+    echo "kbd-internal: timed out waiting for another kbd-internal run" >&2
+    exit 1
+fi
 
 PORT="$(find_port)" || {
     log "ERROR: no i8042 KBD port found"
@@ -85,7 +114,14 @@ case "${1:-}" in
         if [ -e "$DRV/$PORT" ]; then
             echo "enabled"
         else
-            echo "disabled"
+            # Unbound is only durable while bind_mode is manual; in auto mode
+            # the next key press re-probes the port and atkbd binds back.
+            MODE="$(cat "$SERIO/$PORT/bind_mode" 2>/dev/null || echo unknown)"
+            if [ "$MODE" = "manual" ]; then
+                echo "disabled (bind_mode=manual)"
+            else
+                echo "disabled (bind_mode=$MODE — unstable); a key press may re-enable it"
+            fi
         fi
         ;;
     *)
